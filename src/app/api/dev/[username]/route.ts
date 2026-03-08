@@ -72,10 +72,28 @@ export async function GET(
     .eq("github_login", username.toLowerCase())
     .single();
 
-  // ─── New dev: return preview without creating a building ───
+  // ─── New dev ───────────────────────────────────────────────
   if (!cached) {
+    // Check if authenticated user is looking up their own profile
+    let isOwnProfile = false;
+    let authUserId: string | null = null;
+    try {
+      const authClient = await createServerSupabase();
+      const { data: { user } } = await authClient.auth.getUser();
+      if (user) {
+        authUserId = user.id;
+        const authLogin = (
+          user.user_metadata.user_name ??
+          user.user_metadata.preferred_username ??
+          ""
+        ).toLowerCase();
+        isOwnProfile = authLogin === username.toLowerCase();
+      }
+    } catch {}
+
+    // Rate limit (skip for own profile — they just logged in)
     let rateLimitKey: string | null = null;
-    if (process.env.NODE_ENV !== "development") {
+    if (!isOwnProfile && process.env.NODE_ENV !== "development") {
       const key = await resolveRateLimitKey(request);
       rateLimitKey = key;
       const limited = await isRateLimited(key);
@@ -88,9 +106,53 @@ export async function GET(
     }
 
     try {
-      const data = await fetchGitHubDeveloperData(username);
+      const data = await fetchGitHubDeveloperData(username, isOwnProfile ? { allowEmpty: true } : undefined);
       if (rateLimitKey) await recordRateLimitRequest(rateLimitKey);
 
+      // Own profile: create building as fallback (auth callback may have failed)
+      if (isOwnProfile && authUserId) {
+        const { data: created, error: createErr } = await sb
+          .from("developers")
+          .upsert({
+            ...data,
+            fetched_at: new Date().toISOString(),
+            claimed: true,
+            claimed_by: authUserId,
+            claimed_at: new Date().toISOString(),
+            fetch_priority: 1,
+          }, { onConflict: "github_login" })
+          .select()
+          .single();
+
+        if (created && !createErr) {
+          // Rank + XP
+          await sb.rpc("assign_new_dev_rank", { dev_id: created.id });
+          sb.rpc("recalculate_ranks").then(() => {}, () => {});
+
+          const xp = calculateGithubXp({
+            contributions: data.contributions_total ?? data.contributions,
+            total_stars: data.total_stars,
+            public_repos: data.public_repos,
+            total_prs: data.total_prs ?? 0,
+          });
+          if (xp > 0) {
+            await sb.rpc("grant_xp", { p_developer_id: created.id, p_source: "github", p_amount: xp });
+            await sb.from("developers").update({ xp_github: xp }).eq("id", created.id);
+          }
+
+          // Re-fetch with assigned rank
+          const { data: withRank } = await sb
+            .from("developers")
+            .select("*")
+            .eq("id", created.id)
+            .single();
+
+          revalidatePath(`/dev/${data.github_login}`);
+          return NextResponse.json({ ...(withRank ?? created), exists: true });
+        }
+      }
+
+      // Not own profile (or creation failed): return preview
       return NextResponse.json({
         exists: false,
         preview: {

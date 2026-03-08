@@ -1016,19 +1016,21 @@ function HomeContent() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let cityStats: any = null;
 
-    // Try pre-computed snapshot first
-    try {
-      const v = Math.floor(Date.now() / 300_000);
-      const snapshotUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/city-data/snapshot.json?v=${v}${cacheBust ? `&_t=${Date.now()}` : ""}`;
-      const snapshotRes = await fetch(snapshotUrl);
-      if (snapshotRes.ok) {
-        const snapshot = await snapshotRes.json();
-        allDevs = snapshot.developers;
-        cityStats = snapshot.stats;
-      }
-    } catch { /* fall through to chunked */ }
+    // Skip snapshot when busting cache — go straight to DB for fresh data
+    if (!bustCache) {
+      try {
+        const v = Math.floor(Date.now() / 300_000);
+        const snapshotUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/city-data/snapshot.json?v=${v}`;
+        const snapshotRes = await fetch(snapshotUrl);
+        if (snapshotRes.ok) {
+          const snapshot = await snapshotRes.json();
+          allDevs = snapshot.developers;
+          cityStats = snapshot.stats;
+        }
+      } catch { /* fall through to chunked */ }
+    }
 
-    // Fallback to chunked API
+    // Fetch from API (primary when busting cache, fallback otherwise)
     if (allDevs.length === 0) {
       const cbParam = bustCache ? `&_t=${Date.now()}` : "";
       const CHUNK = 1000;
@@ -1083,7 +1085,7 @@ function HomeContent() {
     setRiver(layout.river);
     setBridges(layout.bridges);
     setDistrictZones(layout.districtZones);
-    setCityCache({ ...layout, stats: cityStats });
+    setCityCache({ ...layout, stats: cityStats, rawDevs: rawDevsRef.current });
     return layout.buildings;
   }, []);
 
@@ -1112,6 +1114,7 @@ function HomeContent() {
     // Return visit: restore from cache or fetch silently
     const cached = getCityCache();
     if (cached) {
+      rawDevsRef.current = cached.rawDevs ?? [];
       setBuildings(cached.buildings);
       setPlazas(cached.plazas);
       setDecorations(cached.decorations);
@@ -1247,7 +1250,7 @@ function HomeContent() {
         setLoadProgress(80);
 
         // Save to cache for return visits
-        setCityCache({ ...finalLayout, stats: cityStats });
+        setCityCache({ ...finalLayout, stats: cityStats, rawDevs: rawDevsRef.current });
         setLoadProgress(95);
 
         // Enforce minimum 800ms display time to avoid flash
@@ -1333,6 +1336,13 @@ function HomeContent() {
           const res = await fetch(`/api/dev/${encodeURIComponent(userParam)}`);
           if (!res.ok) return;
           const devData = await res.json();
+
+          // Dev doesn't exist in DB yet (auth callback may have failed) — skip injection
+          if (devData.exists === false) return;
+
+          // Dedup: another effect may have already injected this dev
+          if (rawDevsRef.current.some((d: Record<string, unknown>) => (d.github_login as string)?.toLowerCase() === userParam.toLowerCase())) return;
+
           const newDev = {
             ...devData,
             owned_items: [],
@@ -1357,7 +1367,7 @@ function HomeContent() {
           setRiver(layout.river);
           setBridges(layout.bridges);
           setDistrictZones(layout.districtZones);
-          setCityCache({ ...layout, stats: stats ?? { total_developers: 0, total_contributions: 0 } });
+          setCityCache({ ...layout, stats: stats ?? { total_developers: 0, total_contributions: 0 }, rawDevs: rawDevsRef.current });
         } finally {
           fetchingUserParam.current = false;
         }
@@ -1378,6 +1388,64 @@ function HomeContent() {
       );
     }
   }, [userParam, giftedParam, buildings, stats]);
+
+  // ── Ensure logged-in user's building always appears ──────────
+  // Covers: page reload, new tab, cache expiry, auth callback failure
+  const ensuringAuthBuilding = useRef<string | null>(null);
+  useEffect(() => {
+    if (!authLogin || buildings.length === 0) return;
+
+    // Building already in city
+    if (buildings.some(b => b.login.toLowerCase() === authLogin)) return;
+
+    // ?user= handler is already handling this
+    if (userParam && userParam.toLowerCase() === authLogin) return;
+
+    // Already fetching for this login
+    if (ensuringAuthBuilding.current === authLogin) return;
+    ensuringAuthBuilding.current = authLogin;
+
+    (async () => {
+      try {
+        const res = await fetch(`/api/dev/${encodeURIComponent(authLogin)}`);
+        if (!res.ok) return;
+        const devData = await res.json();
+        if (devData.exists === false) return;
+
+        // Dedup: another effect or search may have already injected this dev
+        if (rawDevsRef.current.some((d: Record<string, unknown>) => (d.github_login as string)?.toLowerCase() === authLogin)) return;
+
+        const newDev = {
+          ...devData,
+          owned_items: [],
+          achievements: [],
+          loadout: null,
+          custom_color: null,
+          billboard_images: [],
+          active_raid_tag: null,
+          kudos_count: devData.kudos_count ?? 0,
+          visit_count: devData.visit_count ?? 0,
+          app_streak: devData.app_streak ?? 0,
+          raid_xp: devData.raid_xp ?? 0,
+          rabbit_completed: false,
+          xp_total: devData.xp_total ?? 0,
+          xp_level: devData.xp_level ?? 1,
+        };
+        rawDevsRef.current = [...rawDevsRef.current, newDev];
+        const layout = generateCityLayout(rawDevsRef.current);
+        setBuildings(layout.buildings);
+        setPlazas(layout.plazas);
+        setDecorations(layout.decorations);
+        setRiver(layout.river);
+        setBridges(layout.bridges);
+        setDistrictZones(layout.districtZones);
+        setCityCache({ ...layout, stats: stats ?? { total_developers: 0, total_contributions: 0 }, rawDevs: rawDevsRef.current });
+      } catch {
+        // Allow retry on next dep change (e.g. transient network error)
+        ensuringAuthBuilding.current = null;
+      }
+    })();
+  }, [authLogin, buildings, userParam, stats]);
 
   // Handle ?compare=userA,userB deep link
   const compareParam = searchParams.get("compare");
@@ -1547,7 +1615,7 @@ function HomeContent() {
         setRiver(layout.river);
         setBridges(layout.bridges);
         setDistrictZones(layout.districtZones);
-        setCityCache({ ...layout, stats: stats ?? { total_developers: 0, total_contributions: 0 } });
+        setCityCache({ ...layout, stats: stats ?? { total_developers: 0, total_contributions: 0 }, rawDevs: rawDevsRef.current });
         updatedBuildings = layout.buildings;
       }
 
