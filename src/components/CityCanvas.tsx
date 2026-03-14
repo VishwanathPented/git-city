@@ -1929,6 +1929,7 @@ interface Props {
   wallpaperSpeed?: number;
   liveByLogin?: Map<string, LiveSession>;
   cityEnergy?: number;
+  onCompareCinematicEnd?: () => void;
 }
 
 // Dynamically adjust scene exposure based on city energy (devs coding)
@@ -1951,7 +1952,7 @@ function CityExposure({ cityEnergy }: { cityEnergy: number }) {
 // Plaza indices for rabbit sightings (progressively further from center)
 const RABBIT_PLAZA_INDICES = [1, 2, 4, 7, 10]; // plazas[1]=slot3, [2]=slot7, [4]=slot18, [7]=slot42, [10]=slot75
 
-export default function CityCanvas({ buildings, plazas, decorations, river, bridges, flyMode, flyVehicle, onExitFly, onCollect, themeIndex, onHud, onPause, focusedBuilding, focusedBuildingB, accentColor, onClearFocus, onBuildingClick, onFocusInfo, flyPauseSignal, flyHasOverlay, flyStartPaused, skyAds, onAdClick, onAdViewed, introMode, onIntroEnd, raidPhase, raidData, raidAttacker, raidDefender, onRaidPhaseComplete, onLandmarkClick, rabbitSighting, onRabbitCaught, rabbitCinematic, onRabbitCinematicEnd, rabbitCinematicTarget, ghostPreviewLogin, holdRise, celebrationActive, wallpaperMode, wallpaperSpeed, liveByLogin, cityEnergy }: Props) {
+export default function CityCanvas({ buildings, plazas, decorations, river, bridges, flyMode, flyVehicle, onExitFly, onCollect, themeIndex, onHud, onPause, focusedBuilding, focusedBuildingB, accentColor, onClearFocus, onBuildingClick, onFocusInfo, flyPauseSignal, flyHasOverlay, flyStartPaused, skyAds, onAdClick, onAdViewed, introMode, onIntroEnd, raidPhase, raidData, raidAttacker, raidDefender, onRaidPhaseComplete, onLandmarkClick, rabbitSighting, onRabbitCaught, rabbitCinematic, onRabbitCinematicEnd, rabbitCinematicTarget, ghostPreviewLogin, holdRise, celebrationActive, wallpaperMode, wallpaperSpeed, liveByLogin, cityEnergy, onCompareCinematicEnd }: Props) {
   const [isCompareCinematicPlaying, setIsCompareCinematicPlaying] = useState(false);
   const prevComparePairRef = useRef<string>("");
 
@@ -2042,7 +2043,10 @@ export default function CityCanvas({ buildings, plazas, decorations, river, brid
                   buildingA={bA}
                   buildingB={bB}
                   controlsRef={{ current: null }} // Let the cinematic own the camera completely while running
-                  onEnd={() => setIsCompareCinematicPlaying(false)}
+                  onEnd={() => {
+                    setIsCompareCinematicPlaying(false);
+                    onCompareCinematicEnd?.();
+                  }}
                 />
               );
             }
@@ -2118,9 +2122,7 @@ export default function CityCanvas({ buildings, plazas, decorations, river, brid
         <Bridge key={`bridge-${i}`} bridge={b} />
       ))}
 
-      {/* Only show default full city if we are NOT in a split-screen compare */}
-      {(!focusedBuilding || !focusedBuildingB) && (
-        <CityScene
+      <CityScene
           buildings={buildings}
           colors={t.building}
           focusedBuilding={raidPhase && raidPhase !== "idle" && raidPhase !== "preview" && raidPhase !== "share" && raidPhase !== "done" ? (raidDefender?.login ?? focusedBuilding) : focusedBuilding}
@@ -2136,7 +2138,6 @@ export default function CityCanvas({ buildings, plazas, decorations, river, brid
           liveByLogin={liveByLogin}
           cityEnergy={cityEnergy}
         />
-      )}
 
       {!isCompareCinematicPlaying && (!focusedBuilding || !focusedBuildingB) && (
         <ComparePath
